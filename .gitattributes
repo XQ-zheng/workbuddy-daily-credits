@@ -1,0 +1,8 @@
+# 统一换行，避免 Windows 提交把 .py 变成 CRLF
+* text=auto eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
