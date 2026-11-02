@@ -23,7 +23,7 @@
 用法
 ----
   python claim_all.py                # 完整流程
-  python claim_all.py --check        # 只读体检，不产生任何写操作
+  python claim_all.py --check        # 不操作积分活动；仍需续期/保存令牌
   python claim_all.py --no-travel    # 跳过派猫猫
   python claim_all.py --no-tasks     # 跳过成长中心任务
   python claim_all.py --quiet        # 只输出一行结论
@@ -42,7 +42,7 @@ if HERE not in sys.path:
 
 import wb_auth  # noqa: E402
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 ACT_BASE = "https://www.workbuddy.cn"          # 成长中心 / 旅行 / 抽奖
 BILLING_BASE = "https://www.codebuddy.cn/v2"   # 签到 / 积分余额
@@ -323,17 +323,22 @@ def run(args):
     dry = "--check" in args
     result = {"version": VERSION, "status": "unknown", "dry_run": dry,
               "steps": {}, "earned": 0, "msg": ""}
-    rt = wb_auth.read_rt()
+    try:
+        rt = wb_auth.read_rt(strict=True)
+    except Exception as exc:
+        result.update(status="config_error", reason=type(exc).__name__,
+                      msg="本机配置读取失败或格式损坏；请先检查权限/格式，不要把凭据发到聊天。")
+        return result, 2
     if not rt:
         result.update(status="need_setup", action="need_rt_setup", msg=(
-            "尚未配置长效令牌：运行 `python scripts/wb_auth.py --export-rt --save`，"
-            "或 `python scripts/wb_auth.py --setup-rt '<令牌>'` 录入一次。"))
+            "尚未配置长效令牌：运行 `python scripts/setup_auth.py` 安全配置并体检。"
+            "仅在本机隐藏输入/密码框中录入，不要发送令牌到聊天或把令牌作为命令参数。"))
         return result, 2
 
     auth = wb_auth.refresh_access_token(rt)
     if not auth.get("ok"):
         result.update(status="auth_failed", action="refresh_failed",
-                      msg="%s（长效令牌可能已失效，重新导出一次即可）" % auth.get("msg"))
+                      msg="%s（请区分网络/服务故障与授权失效；确认失效后用 setup_auth.py --replace 本机重新录入）" % auth.get("msg"))
         result["detail"] = {"code": auth.get("code")}
         return result, 2
     at = auth["access_token"]
@@ -341,7 +346,7 @@ def run(args):
         try:
             wb_auth.save_rt(auth["new_rt"], source="refresh")
         except Exception:
-            result.setdefault("warnings", []).append("新令牌回写失败（旧令牌仍可用）")
+            result.setdefault("warnings", []).append("新令牌回写失败；下次运行可能需重新授权，请检查文件权限")
     result["detail"] = {"token_masked": auth.get("masked"), "rt_rotated": auth.get("rotated")}
 
     before = activity_total(at)
@@ -365,7 +370,7 @@ def run(args):
         try:
             out = fn()
         except Exception as e:
-            out = {"step": name, "ok": False, "error": "exception", "msg": str(e)[:200]}
+            out = {"step": name, "ok": False, "error": "exception", "msg": wb_auth.safe_output(str(e))[:200]}
         result["steps"][name] = out
         if out.get("ok") is False:
             failed += 1
@@ -381,6 +386,8 @@ def run(args):
         "redeem": (s.get("redeem") or {}).get("credit_sum") or 0,
         "lottery": (s.get("lottery") or {}).get("credit_sum") or 0,
     }
+    if dry:
+        parts = {name: 0 for name in parts}
     result["earned_breakdown"] = parts
     result["earned"] = sum(parts.values())
 
@@ -412,6 +419,7 @@ def main():
         print("claim_all %s" % VERSION)
         return 0
     res, code = run(args)
+    res = wb_auth.safe_output(res)
     if "--quiet" in args:
         print(res.get("msg") or res.get("status"))
     else:
@@ -420,4 +428,9 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as e:
+        wb_auth.print_result({"status": "error", "reason": type(e).__name__,
+                              "msg": "执行失败；未输出凭据或原始异常，请检查网络及本机配置权限。"})
+        sys.exit(1)

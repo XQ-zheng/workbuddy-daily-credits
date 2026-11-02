@@ -4,13 +4,13 @@ slug: workbuddy-daily-credits
 displayName: "WorkBuddy自动完成任务领取积分与打卡签到专家"
 display_name: "WorkBuddy自动完成任务领取积分与打卡签到专家"
 display_name_en: "WorkBuddy Auto-Claim Expert — Tasks, Check-in & Credits"
-version: "1.0.0"
+version: "1.1.0"
 author: XQ-zheng
 license: "MIT"
-summary: "一条命令领完 WorkBuddy 账号上所有可得积分：每日签到（100/天）、成长中心 19 个任务自动接取+完成即领、派猫猫旅行、连签里程碑兑换、积分抽奖。长效令牌自续期，日常运行不需要打开客户端、不需要重新登录。"
-description: "WorkBuddy自动完成任务领取积分与打卡签到专家（workbuddy自动完成任务领取积分与打卡签到专家 / WorkBuddy 自动领积分 / 每日签到 100 分）。当用户说「领积分」「签到」「打卡」「把能领的积分都领了」「自动领积分」「不用登录就能领」「设置每天自动领积分」「自动完成任务」，或提到 WorkBuddy 积分不够、成长中心任务、连签、派猫猫旅行、积分抽奖时使用。通过官方接口一次领完 5 类积分来源，幂等、脱敏、零第三方依赖；可创建每日自动化，后台跑完并把完成回执发回对话。"
-description_zh: "WorkBuddy自动完成任务领取积分与打卡签到专家：签到 + 成长中心 19 个任务自动接取与领取 + 派猫猫旅行 + 连签兑换 + 抽奖，一次跑完；长效令牌自续期，日常无需登录，可挂每日自动化并把完成回执发回对话。"
-description_en: "WorkBuddy Auto-Claim Expert: daily check-in, accepting and claiming all 19 growth-center task rewards, Buddy travel, streak milestones and lottery in a single run. Long-lived token with auto-renewal — no re-login and no client UI needed for daily runs. Supports a daily automation that posts a completion report back to the chat."
+summary: "WorkBuddy 积分领取技能，含本机安全授权引导、令牌续期与脱敏只读体检；授权完成后处理每日签到、成长任务、派猫猫旅行、连签兑换和抽奖。"
+description: "WorkBuddy自动完成任务领取积分与打卡签到专家（workbuddy自动完成任务领取积分与打卡签到专家 / WorkBuddy 自动领积分 / 每日签到）。当用户说「领积分」「签到」「打卡」「WorkBuddy 积分」「自动领积分」「配置授权」「扫码登录」「跑体检」或提到成长中心任务、连签、派猫猫旅行、积分抽奖时使用。首次安装或未配置凭据时，必须先使用 scripts/setup_auth.py；优先使用宿主提供的官方 WorkBuddy 登录/扫码授权，并仅在宿主可安全交接授权的情况下复用，不猜测宿主工具或认证 API。若无可用登录交接，只可指导用户在本机隐藏输入/密码框录入其自行取得的令牌；绝不索要、回显或要求发送令牌到聊天、命令参数、命令历史或日志。授权保存后自动运行 --check，仅汇报脱敏状态；未授权成功不得尝试领取。"
+description_zh: "WorkBuddy 积分技能。授权时优先走宿主真实提供的官方扫码/登录流程；令牌仅在本机隐藏输入或密码框录入，保存后自动只读体检。绝不向聊天索要、输出或传递令牌。"
+description_en: "WorkBuddy credits skill. Prefer an actually available official host sign-in or QR flow; otherwise accept credentials only through local hidden input, save locally and run a read-only activity check. Never request, display or transmit tokens in chat, command arguments, history or logs."
 keywords:
   - 领积分
   - 签到
@@ -50,45 +50,70 @@ agent_created: true
 
 ---
 
-## 二、标准执行流程（Agent 按此顺序做）
+## 二、首次安装与授权（Agent 按此顺序做）
 
-### Step 0 · 判断环境
-
-```bash
-python scripts/wb_auth.py --info      # 看令牌是否已配置
-```
-
-`configured: true` → 直接进 Step 2；`false` → 进 Step 1。
-
-### Step 1 · 一次性配置长效令牌
+先在**技能安装目录**运行（不要假定用户当前目录就是技能目录）：
 
 ```bash
-python scripts/wb_auth.py --export-rt --save     # 老客户端（登录态明文）可自动导出
-python scripts/wb_auth.py --setup-rt '<令牌>'     # 5.6.2+ 加密登录态：手动录入一次
+python scripts/setup_auth.py --non-interactive
 ```
 
-`--export-rt` 在 5.6.2+ 上会失败——登录态已静态加密，解密密钥由客户端运行时提供、不落盘，
-本地无法解开。这是官方设计，不是脚本缺陷，**不要尝试逆向解密**，直接用 `--setup-rt` 录入一次。
+它复用 `~/.workbuddy/checkin-rt.json`，没有配置时尝试受支持的本机明文登录态导出；保存后自动运行 `--check`。只输出脱敏结果，安装/后台模式不弹窗、不读取安装管道、不等待用户输入。
 
-若机器上已有其他长效令牌版工具写下的 `~/.workbuddy/checkin-rt.json`，本技能直接复用，不必重配。
+- `status=ready` 且 `check_exit_code=0`：授权与体检通过；安装请求到此完成，只有用户要求领取时才继续。
+- `status=check_failed`：有本机配置，但验证/接口调用失败。根据脱敏结果排查网络、服务与授权问题，不要把保存成功当作体检成功，不要反复索要令牌。
+- `status=config_error`：已有配置读取失败/损坏；先排查文件权限与格式，不要覆盖文件或当成缺少令牌。
+- `status=need_local_input`：明确汇报“技能已安装，账号授权尚未完成”，按下面的安全授权流程继续。
 
-### Step 2 · 只读体检（推荐每次先跑）
+### 缺授权时：官方交接 → 本机隐藏输入
+
+先检查宿主是否**实际提供** WorkBuddy 官方登录/扫码授权工具。仅当工具可用、用户能在官方界面确认、且有受支持的安全凭据交接接口时才使用。交接完成再运行 `setup_auth.py --non-interactive` 验证。不得猜测工具名称或认证 API，也不得声称脚本已生成二维码、任意官方网页扫码后都能自动获取凭据。
+
+本仓库**没有独立扫码登录协议**；隐藏输入只负责保存用户已经自行取得的令牌。没有令牌且宿主不能安全交接时，如实停在授权待完成，避免无效重装或重复导出。
+
+用户已在官方渠道自行取得自己的令牌时，提供以下本机入口，并说明“只在你电脑上的隐藏输入框粘贴，不要发到聊天”：
+
+```bash
+# 用户自己的本机交互终端，隐藏输入 → 本机保存 → 自动体检
+python scripts/setup_auth.py
+
+# Agent 的命令工具不能提供交互终端时，可打开用户本机密码框（需 tkinter/桌面）
+python scripts/setup_auth.py --gui
+```
+
+密码框在本机进程内直接调用已安装的 `wb_auth.setup_rt()` 保存，不把输入回传对话。终端不能保证隐藏输入时，停止并提示换终端/密码框，绝不回退到明文。用户取消、输入无效、GUI 不可用时只汇报脱敏原因；没有令牌就让用户取消，不要改为在聊天索取。
+
+不要让用户把令牌放入聊天、截图、命令参数、管道、环境变量或日志；不要查看/打印凭据文件，也不要粘贴浏览器监听代码。确认授权失效后可用 `setup_auth.py --replace`（或加 `--gui`）在本机重新录入；网络错误时不要覆盖已有配置。
+
+底层 `wb_auth.py --setup-rt` / `--setup-gui` 仅保存令牌，单独调用后需立即运行 `claim_all.py --check`。推荐始终用整合入口自动体检。`wb_auth.py --info` 只表示配置是否存在，不证明授权有效。
+
+`--check` 不操作积分活动；仍需认证续期、必要时回写本机令牌，并通过 POST 查询签到状态。只汇报脱敏状态和体检结果，不展示凭据或令牌片段。
+
+---
+
+## 三、配置后的日常流程
+
+体检通过前不可领取；通过后再按需执行。
+
+配置存在 → 进入只读体检；未配置 → 回到本节首次授权步骤。不得尝试绕过 WorkBuddy 的客户端加密。
+
+### Step 1 · 只读体检（推荐每次先跑）
 
 ```bash
 python scripts/claim_all.py --check
 ```
 
-输出每个来源的待领项，**不产生任何写请求**。用它给用户汇报"现在还有多少没领"。
+输出每个来源的待领项，**不接取/领取/派遣/兑换/抽奖**。用它给用户汇报"现在还有多少没领"。
 
-### Step 3 · 正式领取
+### Step 2 · 正式领取
 
 ```bash
 python scripts/claim_all.py
 ```
 
-退出码：`0` 全部成功 ｜ `1` 有子步骤失败（看 `steps.*.ok==false`）｜ `2` 令牌未配置或失效。
+退出码：`0` 全部成功 ｜ `1` 有子步骤失败（看 `steps.*.ok==false`）｜ `2` 令牌未配置或认证刷新失败（也可能是网络/服务故障）。
 
-### Step 4 · 按「完成回执」格式回给用户
+### Step 3 · 按「完成回执」格式回给用户
 
 不要直接把原始 JSON 扔给用户。按下面模板汇报（数字全部来自 JSON，不要自己编）：
 
@@ -101,12 +126,12 @@ python scripts/claim_all.py
 ├─ 连签兑换     +<earned_breakdown.redeem>
 └─ 积分抽奖     +<earned_breakdown.lottery>
 待完成：<steps.tasks.pending 条数> 项 ｜ 加油站活动累计：<activity_total_credits>
-异常：<steps 里 ok==false 的原文，没有就写「无」>
+异常：<steps 里 ok==false 的脱敏摘要，没有就写「无」>
 ```
 
 ---
 
-## 三、任务"自动完成"的真实边界（必须向用户说清，别夸大）
+## 四、任务"自动完成"的真实边界（必须向用户说清，别夸大）
 
 成长中心任务**无法伪造完成度**——服务端校验真实行为，未完成返回 `400 task not completed`。
 
@@ -135,7 +160,7 @@ python scripts/claim_all.py
 
 ---
 
-## 四、挂成每日自动化（"永久调用，不用每天登录"）
+## 五、挂成每日自动化（"永久调用，不用每天登录"）
 
 用户说「设置每天自动领积分」「以后每天都帮我领」时，**不要只跑一次**，给出下面两个方案并帮他配好。
 
@@ -163,15 +188,15 @@ python scripts/claim_all.py
 schtasks /create /tn "WorkBuddyDailyCredits" /tr "python \"%USERPROFILE%\.workbuddy\skills\workbuddy-daily-credits\scripts\claim_all.py\" --quiet" /sc daily /st 08:50
 ```
 
-令牌会自续期，配一次就不用再管；客户端不开也能跑。
+正常情况下会自动续期，客户端不开也能跑；授权撤销或官方策略变化时仍需重新授权。
 
 ---
 
-## 五、常用参数
+## 六、常用参数
 
 | 参数 | 作用 |
 |---|---|
-| `--check` | 只读体检：报告待领项，不做任何写操作 |
+| `--check` | 只读体检：报告待领项，不操作积分活动；可能刷新/保存令牌 |
 | `--no-tasks` | 跳过成长中心任务（不接取、不领取） |
 | `--no-travel` | 跳过派猫猫旅行 |
 | `--no-redeem` / `--no-lottery` / `--no-checkin` | 跳过连签兑换 / 抽奖 / 签到 |
@@ -180,7 +205,7 @@ schtasks /create /tn "WorkBuddyDailyCredits" /tr "python \"%USERPROFILE%\.workbu
 
 ---
 
-## 六、输出字段怎么读
+## 七、输出字段怎么读
 
 ```json
 {
@@ -198,25 +223,27 @@ schtasks /create /tn "WorkBuddyDailyCredits" /tr "python \"%USERPROFILE%\.workbu
 
 ---
 
-## 七、安全红线
+## 八、安全红线
 
 - 长效令牌**等同账号钥匙**：只存本机 `~/.workbuddy/checkin-rt.json`（POSIX 下 0600），
-  只写本机、不上传，任何输出只出现脱敏形态（如 `eyJhbG...xxxx`）。
+  只写本机、不上传，日志和回执不显示任何令牌片段。
+- 从不要求用户把令牌发到聊天、截图或命令参数中。`--setup-rt` 使用终端隐藏输入；`--setup-gui` 用本机密码框输入。
+- 安装器/非交互进程不得等待或读取隐藏输入。用户需本机交互授权时，说明安装完成但授权待用户在本机完成。
 - 只访问 WorkBuddy 官方域名（`www.workbuddy.cn` / `www.codebuddy.cn` / `copilot.tencent.com`）。
 - 写操作仅限官方活动接口的领取类端点，**不做**模拟点击、逆向加密、绕过风控。
 - `python scripts/wb_auth.py --forget` 可随时置空清除本机令牌。
 
 ---
 
-## 八、排错
+## 九、排错
 
 | 现象 | 处理 |
 |---|---|
-| `status=need_setup` | 还没配置令牌，做 Step 1 |
-| `status=auth_failed` | 长效令牌失效，重新导出/录入一次即可恢复 |
+| `status=need_setup` | 还没配置授权；先使用宿主实际支持的官方登录/扫码流程；否则只提示本机安全配置，不索取令牌 |
+| `status=auth_failed` | 检查网络、官方服务状态和返回码；只有明确授权失效后，才提示 `python scripts/setup_auth.py --replace` 在本机重新配置 |
 | 任务一直 `0/1` | 该任务的真实行为还没发生，去用一次对应功能，次日自动到账 |
 | `task not completed` | 正常：服务端在拦"没做任务就想领"，不是脚本 bug |
 | 旅行没动 | 旅行中无法召回（官方无接口），到达后下次运行自动领取 |
-| `--export-rt` 报已加密 | 5.6.2+ 的设计，改 `--setup-rt` |
+| `--export-rt` 不可用 | 显示的只是失败原因摘要；不要解密或猜测密钥位置。用宿主真实提供的官方扫码交接，或让用户在本机隐藏输入 |
 
 接口细节（请求体、字段、错误码）见 `references/api-spec.md`；完整说明见 `README.md`。

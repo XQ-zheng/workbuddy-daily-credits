@@ -23,15 +23,17 @@ if (-not (Test-Path $SkillsDir)) { New-Item -ItemType Directory -Path $SkillsDir
 if (Test-Path (Join-Path $Dest ".git")) {
     Write-Host "==> already installed, updating"
     & git -C $Dest pull --ff-only
+    if ($LASTEXITCODE -ne 0) { throw "Git update failed; no setup was run." }
 } elseif (Test-Path $Dest) {
     Write-Host "!! $Dest exists but is not a git repo. Move it away and retry." -ForegroundColor Red
     exit 1
 } else {
     Write-Host "==> cloning"
     & git clone --depth 1 $Repo $Dest
+    if ($LASTEXITCODE -ne 0) { throw "Git clone failed; no setup was run." }
 }
 
-foreach ($f in @("SKILL.md", "scripts\claim_all.py", "scripts\wb_auth.py")) {
+foreach ($f in @("SKILL.md", "scripts\claim_all.py", "scripts\wb_auth.py", "scripts\setup_auth.py")) {
     if (-not (Test-Path (Join-Path $Dest $f))) {
         Write-Host "!! missing file: $f - install incomplete" -ForegroundColor Red
         exit 1
@@ -47,12 +49,20 @@ Write-Host ""
 Write-Host "OK - installed" -ForegroundColor Green
 if ($null -ne $Py) {
     & $Py (Join-Path $Dest "scripts\claim_all.py") --version
+    if ($LASTEXITCODE -ne 0) { throw "Python version check failed." }
     Write-Host ""
-    Write-Host "First-time setup (once):"
-    Write-Host "  cd `"$Dest`""
-    Write-Host "  $Py scripts\wb_auth.py --export-rt --save     # older clients"
-    Write-Host "  $Py scripts\wb_auth.py --setup-rt '<token>'   # 5.6.2+ manual"
-    Write-Host "  $Py scripts\claim_all.py --check             # read-only check"
+    Write-Host "==> Safe local setup and activity check (non-interactive)"
+    & $Py (Join-Path $Dest "scripts\setup_auth.py") --non-interactive
+    $SetupCode = $LASTEXITCODE
+    if ($SetupCode -eq 0) {
+        Write-Host "Authorization and activity check passed. No points were claimed." -ForegroundColor Green
+    } else {
+        Write-Host "Installed; authorization/check is incomplete. See the masked status above."
+        Write-Host "Use official WorkBuddy sign-in if available; this script does not generate a login QR code."
+        Write-Host "If you already have your own token, enter it only in the local hidden-input window:"
+        Write-Host "  $Py `"$(Join-Path $Dest 'scripts\setup_auth.py')`" --gui"
+        Write-Host "Never paste tokens into chat, command arguments, screenshots or logs."
+    }
 } else {
     Write-Host "!! python not found. Install Python 3.8+ first." -ForegroundColor Red
 }

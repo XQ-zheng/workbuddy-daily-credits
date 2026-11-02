@@ -4,8 +4,8 @@
 
 设计要点
 --------
-WorkBuddy 客户端从 5.6.2 起对登录态做了静态加密（accessToken/refreshToken 变成
-`{"$wbEncrypted":1,"envelope":"..."}` 信封），解密密钥由客户端运行时提供、不落盘。
+部分 WorkBuddy 客户端的登录态使用 `$wbEncrypted` 信封；本工具不解密该格式，
+也不根据客户端版本推断密钥存储方式。
 因此本模块**不尝试解密登录态**，只做两件事：
 
 1. 使用一份已保存的**长效令牌**（refresh token）换取短效接口令牌；
@@ -13,21 +13,29 @@ WorkBuddy 客户端从 5.6.2 起对登录态做了静态加密（accessToken/ref
 
 长效令牌的三个来源（任一即可）：
   - 已在 `~/.workbuddy/checkin-rt.json` 里（与其他长效令牌版工具互通）
-  - `--setup-rt <令牌>` 手动录入
-  - 登录态仍是明文 JSON 的老客户端：`--export-rt` 直接导出
+  - `--setup-rt` 本机终端隐藏输入；`--setup-gui` 本机密码框输入
+  - 登录态仍是明文 JSON 的客户端：`--export-rt --save` 直接保存（不打印原文）
+
+首次配置推荐运行 `python scripts/setup_auth.py`，保存后自动运行 --check。
+不要把令牌发送到聊天、作为命令参数或通过管道输入。
 
 令牌等同账号钥匙：只读本机文件、只写本机文件、任何输出都走脱敏。
 """
 
+import argparse
+import getpass
 import json
 import os
+import re
 import stat
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
+import warnings
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 HOME = os.path.expanduser("~")
 WB_DIR = os.path.join(HOME, ".workbuddy")
@@ -38,10 +46,41 @@ PLUGIN_API = "https://copilot.tencent.com"
 REFRESH_PATH = "/v2/plugin/auth/token/refresh"
 
 TIMEOUT = 20
+_SECRETS = set()
+
+
+class SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.exit(2, "Invalid arguments. Token values are never accepted as arguments.\n")
+
+
+def remember_secret(value):
+    if isinstance(value, str) and value:
+        _SECRETS.add(value)
+
+
+def safe_output(value):
+    """输出边界统一脱敏，包含官方接口/异常可能回显的凭据。"""
+    if isinstance(value, dict):
+        return {key: "***" if str(key).lower().replace("_", "").replace("-", "")
+                in ("rt", "newrt", "refreshtoken", "accesstoken", "authorization",
+                    "xrefreshtoken")
+                else safe_output(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [safe_output(item) for item in value]
+    if isinstance(value, str):
+        for secret in sorted(_SECRETS, key=len, reverse=True):
+            value = value.replace(secret, "***")
+        return re.sub(r"[A-Za-z0-9_~-]{20,}\.[A-Za-z0-9_~-]+\.[A-Za-z0-9_~-]+", "***", value)
+    return value
+
+
+def print_result(value):
+    print(json.dumps(safe_output(value), ensure_ascii=False, indent=2))
 
 
 # ---------------------------------------------------------------- 凭据读写
-def read_rt(path=None):
+def read_rt(path=None, strict=False):
     """读取本机保存的长效令牌；不存在或为空返回 None。"""
     path = path or DEFAULT_RT_FILE
     try:
@@ -53,15 +92,19 @@ def read_rt(path=None):
             for key in ("rt", "refresh_token", "refreshToken"):
                 val = obj.get(key)
                 if val and isinstance(val, str):
+                    remember_secret(val.strip())
                     return val.strip()
     except Exception:
+        if strict:
+            raise
         return None
     return None
 
 
 def save_rt(rt, path=None, source="refresh"):
     """落盘长效令牌（仅本机，POSIX 下 0600）。"""
-    path = path or DEFAULT_RT_FILE
+    path = os.path.abspath(path or DEFAULT_RT_FILE)
+    remember_secret(rt)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     obj = {
         "v": 1,
@@ -70,13 +113,16 @@ def save_rt(rt, path=None, source="refresh"):
         "saved_at": int(time.time()),
         "version": VERSION,
     }
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+    fd, temp_path = tempfile.mkstemp(prefix=".checkin-", dir=os.path.dirname(path))
     try:
-        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-    except Exception:
-        pass
-    return obj
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+        os.chmod(temp_path, stat.S_IRUSR | stat.S_IWUSR)
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+    return {"file": path, "saved_at": obj["saved_at"], "version": VERSION}
 
 
 def forget_rt(path=None):
@@ -93,13 +139,8 @@ def forget_rt(path=None):
 
 
 def mask_token(token):
-    """脱敏：只留头尾少量字符，任何日志都只能用这个。"""
-    if not token:
-        return "***"
-    token = str(token)
-    if len(token) <= 14:
-        return "***"
-    return "%s...%s" % (token[:6], token[-4:])
+    """不输出任何令牌字符；仅保留是否存在的语义。"""
+    return "***"
 
 
 def looks_like_token(value):
@@ -129,14 +170,14 @@ def _request(url, method="GET", token=None, body=None, headers=None):
         raw = e.read().decode("utf-8", "replace")
         return e.code, _maybe_json(raw)
     except Exception as e:  # 网络层失败
-        return -1, {"code": -1, "msg": str(e)[:200]}
+        return -1, {"code": -1, "msg": safe_output(str(e))[:200]}
 
 
 def _maybe_json(raw):
     try:
         return json.loads(raw)
     except Exception:
-        return {"code": -1, "msg": (raw or "")[:400]}
+        return {"code": -1, "msg": safe_output(raw or "")[:400]}
 
 
 def api(method, url, token, body=None):
@@ -153,6 +194,7 @@ def refresh_access_token(rt):
       失败 {"ok": False, "error":..., "code":..., "msg":...}
     注意：返回值里的 access_token 属于敏感信息，调用方不得打印。
     """
+    remember_secret(rt)
     status, res = _request(
         PLUGIN_API + REFRESH_PATH,
         method="POST",
@@ -164,7 +206,7 @@ def refresh_access_token(rt):
         },
     )
     if not isinstance(res, dict):
-        return {"ok": False, "error": "refresh_bad_response", "msg": str(res)[:200]}
+        return {"ok": False, "error": "refresh_bad_response", "msg": safe_output(str(res))[:200]}
     if res.get("code") != 0 or not isinstance(res.get("data"), dict):
         return {
             "ok": False,
@@ -178,6 +220,8 @@ def refresh_access_token(rt):
         return {"ok": False, "error": "no_access_token",
                 "msg": "刷新应答缺少接口令牌"}
     new_rt = data.get("refreshToken") or ""
+    remember_secret(at)
+    remember_secret(new_rt)
     return {
         "ok": True,
         "access_token": at,
@@ -198,9 +242,7 @@ AUTH_CANDIDATES = [
 def export_rt_from_local_state():
     """从本机登录态导出长效令牌。
 
-    仅当登录态是明文 JSON（5.5.x 及更早 / 未开启加密）时可用；
-    5.6.2+ 的加密信封无法在本地解开（密钥由客户端运行时提供、不落盘），
-    此时给出明确指引，不做任何猜测性尝试。
+    仅支持明文 JSON；加密、缺文件和读取失败分别报告，不推断密钥位置。
     """
     tried = []
     for path in AUTH_CANDIDATES:
@@ -208,35 +250,76 @@ def export_rt_from_local_state():
             continue
         try:
             with open(path, "r", encoding="utf-8") as f:
-                auth = json.load(f).get("auth", {})
+                obj = json.load(f)
+                auth = obj.get("auth", {}) if isinstance(obj, dict) else {}
+                if not isinstance(auth, dict):
+                    auth = {}
         except Exception as e:
-            tried.append((path, "读取失败: %s" % str(e)[:80]))
+            tried.append((path, "读取失败: %s" % type(e).__name__))
             continue
         raw = auth.get("refreshToken")
         if raw is None:
             tried.append((path, "缺少 refreshToken 字段"))
             continue
         if isinstance(raw, dict):
-            tried.append((path, "已加密（$wbEncrypted 信封），本地无法解开"))
+            tried.append((path, "加密或非字符串登录态，本工具不支持导出"))
             continue
         if isinstance(raw, str) and looks_like_token(raw):
+            remember_secret(raw)
             return {"ok": True, "rt": raw, "path": path}
         tried.append((path, "refreshToken 格式异常"))
     return {
         "ok": False,
         "error": "cannot_export",
         "tried": [{"path": p, "reason": r} for p, r in tried],
-        "hint": "登录态已加密，无法在本地导出。请改用 --setup-rt 录入长效令牌；"
-                "若你装过其他长效令牌版签到工具，直接复用其 ~/.workbuddy/checkin-rt.json 即可。",
+        "hint": "未找到可导出的明文令牌，具体原因见 tried。若已有自己的令牌，"
+                "仅在本机 --setup-rt 隐藏输入或 --setup-gui 密码框中录入；不要发送到聊天。",
     }
 
 
 def setup_rt(value, path=None):
+    remember_secret(value)
     if not looks_like_token(value):
         return {"ok": False, "error": "bad_token",
                 "msg": "内容不像有效的长效令牌（应为一段较长的 base64url 串，含两个点号）"}
     save_rt(value.strip(), path=path, source="manual")
     return {"ok": True, "action": "rt_saved", "token_masked": mask_token(value)}
+
+
+def prompt_rt(gui=False):
+    """只在用户本机收集凭据；终端无法隐藏输入时拒绝回退到明文。"""
+    try:
+        if not gui and not sys.stdin.isatty():
+            return {"ok": False, "error": "hidden_input_unavailable",
+                    "msg": "当前没有本机交互终端，未读取令牌。请改用 --setup-gui。"}
+        if gui:
+            import tkinter as tk
+            from tkinter import simpledialog
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                value = simpledialog.askstring(
+                    "WorkBuddy local token setup",
+                    "Paste your own refresh token here (hidden).\n"
+                    "This is local input, not QR login or chat. Cancel if unavailable.",
+                    show="*", parent=root)
+            finally:
+                root.destroy()
+            if value is None:
+                return {"ok": False, "error": "input_cancelled"}
+        else:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                value = getpass.getpass("Refresh token (hidden, local only): ")
+        return setup_rt(value)
+    except (EOFError, KeyboardInterrupt):
+        return {"ok": False, "error": "input_cancelled"}
+    except getpass.GetPassWarning:
+        return {"ok": False, "error": "hidden_input_unavailable",
+                "msg": "当前终端无法隐藏输入，未读取令牌。请在本机交互终端重试或使用 --setup-gui。"}
+    except Exception as e:
+        return {"ok": False, "error": "local_input_failed", "reason": type(e).__name__,
+                "msg": "本机输入或保存失败，请检查终端/图形环境及本机配置文件权限。"}
 
 
 def rt_status(path=None):
@@ -252,37 +335,48 @@ def debug_suppress_warning():
     return None
 
 
-if __name__ == "__main__":
-    argv = sys.argv[1:]
-    if "--help" in argv or "-h" in argv:
-        print(__doc__)
-        sys.exit(0)
-    if "--info" in argv:
-        print(json.dumps(rt_status(), ensure_ascii=False, indent=2))
-        sys.exit(0)
-    if "--forget" in argv:
-        print(json.dumps({"ok": forget_rt()}, ensure_ascii=False, indent=2))
-        sys.exit(0)
-    if "--export-rt" in argv:
+def main(argv=None):
+    parser = SafeArgumentParser(description=__doc__)
+    actions = parser.add_mutually_exclusive_group()
+    for flag in ("--info", "--forget", "--export-rt", "--setup-rt", "--setup-gui"):
+        actions.add_argument(flag, action="store_true")
+    parser.add_argument("--save", action="store_true", help="只保存导出的令牌，不输出原文")
+    parser.add_argument("--version", action="version", version="wb_auth " + VERSION)
+    # argparse 默认会把未知参数（可能是旧用法里的令牌）打印出来。
+    args, unknown = parser.parse_known_args(argv)
+    if unknown:
+        print_result({"ok": False, "error": "unsafe_or_unknown_arguments",
+                      "msg": "不接受令牌参数。请只运行 --setup-rt，在本机隐藏输入；不要把令牌发到聊天。"})
+        return 1
+    if args.info:
+        print_result(rt_status())
+        return 0
+    if args.forget:
+        print_result({"ok": forget_rt()})
+        return 0
+    if args.export_rt:
         res = export_rt_from_local_state()
-        if res.get("ok") and "--save" in argv:
-            print(json.dumps({"ok": True, "saved": save_rt(res["rt"], source="export"),
-                              "token_masked": mask_token(res["rt"])},
-                             ensure_ascii=False, indent=2))
+        if res.get("ok") and args.save:
+            save_rt(res["rt"], source="export")
+            print_result({"ok": True, "saved": True, "token_masked": mask_token(res["rt"])})
         elif res.get("ok"):
-            print(res["rt"])  # 用户显式要求明文
-            sys.stderr.write("[提示] 以上为长效令牌明文，请自行保管，勿分享。\n")
+            print_result({"ok": True, "saved": False, "token_masked": mask_token(res["rt"]),
+                          "hint": "使用 --export-rt --save 直接保存到本机；不提供明文输出。"})
         else:
-            print(json.dumps(res, ensure_ascii=False, indent=2))
-            sys.exit(1)
-        sys.exit(0)
-    if "--setup-rt" in argv:
-        try:
-            val = argv[argv.index("--setup-rt") + 1]
-        except (IndexError, ValueError):
-            sys.stderr.write("--setup-rt 后需跟令牌字符串\n")
-            sys.exit(1)
-        res = setup_rt(val)
-        print(json.dumps(res, ensure_ascii=False, indent=2))
-        sys.exit(0 if res.get("ok") else 1)
-    print(__doc__)
+            print_result(res)
+            return 1
+        return 0
+    if args.setup_rt or args.setup_gui:
+        res = prompt_rt(gui=args.setup_gui)
+        print_result(res)
+        return 0 if res.get("ok") else 1
+    parser.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as e:
+        print_result({"ok": False, "error": "auth_command_failed", "reason": type(e).__name__})
+        sys.exit(1)

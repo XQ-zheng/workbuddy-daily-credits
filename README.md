@@ -2,10 +2,10 @@
 
 > 一个只针对 **WorkBuddy** 的 Agent Skill：每天自动领完账号上**所有能拿的积分**——
 > 签到 100 分、19 个成长中心任务、派猫猫旅行、连签兑换、积分抽奖，一次跑完。
-> **日常运行不需要打开客户端，也不需要重新登录**；挂成每日自动化后，每天早上会把「完成回执」发回你的对话。
+> **授权有效时，日常运行不需要打开客户端或重复登录**；挂成每日自动化后，每天早上会把「完成回执」发回你的对话。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.0-blue.svg)](../../releases)
+[![Version](https://img.shields.io/badge/version-v1.1-blue.svg)](../../releases)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB.svg)](https://www.python.org/)
 [![Deps](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#)
 [![Platform](https://img.shields.io/badge/platform-WorkBuddy%20only-orange.svg)](#)
@@ -136,13 +136,12 @@ WorkBuddy 客户端的登录态分两层：**长效令牌**（refresh token，�
 
 结果：
 
-- 首次配置一次长效令牌，之后**每天运行都不需要登录、不需要扫码、不需要打开客户端**；
-- 令牌会自续期，只要你别在网页端/其他设备把它踢掉，就能长期跑；
-- 令牌只存本机（POSIX 下 `0600`），输出里永远是 `eyJhbG...xxxx` 这种脱敏形态。
+- 首次成功授权后，只要令牌与官方接口仍有效，日常运行不需要重复登录或打开客户端；
+- 令牌会尝试自续期，但授权撤销、网络或官方接口策略变化时可能仍需重新授权；
+- 令牌只存本机（POSIX 下 `0600`），命令输出统一脱敏，Agent 回执不展示令牌片段。
 
-> 从 5.6.2 起客户端把登录态做了静态加密（`$wbEncrypted` 信封），**解密密钥由客户端运行时提供、不落盘**。
-> 所以本项目不尝试解密，只要求你用 `--setup-rt` 录入一次长效令牌。
-> 这是官方设计，不是缺陷。
+> 部分客户端将登录态存为 `$wbEncrypted` 信封。本工具不支持该格式的导出，也不推断密钥的存储位置。
+> 请先使用宿主实际提供的官方授权交接；已自行取得令牌时，可用本机隐藏输入安全保存。
 
 ---
 
@@ -150,11 +149,14 @@ WorkBuddy 客户端的登录态分两层：**长效令牌**（refresh token，�
 
 ### 方式一 · 直接对 WorkBuddy 说一句话（最省事）
 
-把下面这句贴进 WorkBuddy 对话框，Agent 会自己 clone、装好、配好、跑体检：
+把下面这句贴进 WorkBuddy 对话框。v1.1 将安全授权流程写入了 SKILL.md，安装后先尝试本机配置与体检：
 
 ```
 帮我安装这个技能：https://github.com/XQ-zheng/workbuddy-daily-credits
-装到 ~/.workbuddy/skills/ 下，然后帮我配置长效令牌并跑一次 --check
+装到 ~/.workbuddy/skills/ 下，读取 SKILL.md，运行 scripts/setup_auth.py --non-interactive。
+若你实际提供官方扫码/登录能力，请让我在官方界面完成授权，并仅通过受支持的安全接口交接。
+若仍缺凭据，不要让我把令牌发到聊天、截图、命令参数或日志；仅提供本机隐藏输入/密码框入口。
+保存后自动运行 --check，只汇报脱敏结果；未完成授权不要领取或声称已就绪。
 ```
 
 ### 方式二 · git clone（一行）
@@ -181,13 +183,15 @@ curl -fsSL https://raw.githubusercontent.com/XQ-zheng/workbuddy-daily-credits/ma
 irm https://raw.githubusercontent.com/XQ-zheng/workbuddy-daily-credits/main/install.ps1 | iex
 ```
 
-脚本只做三件事：clone 到 skills 目录 → 校验文件完整 → 打印下一步。
+脚本执行：安装/更新 → 校验文件 → `setup_auth.py --non-interactive`。
+已有本机配置或可导出的明文登录态时，自动保存并运行 `--check`；否则输出授权待完成状态与本机录入指令。
+安装器不会从安装管道读取令牌，也不会自动弹出要求用户提供令牌的聊天。
 
 ### 装完怎么确认
 
 ```bash
 python ~/.workbuddy/skills/workbuddy-daily-credits/scripts/claim_all.py --version
-# claim_all 1.0.0
+# claim_all 1.1.0
 ```
 
 然后在 WorkBuddy 的**技能管理 / 技能搜索**里搜「**领积分**」「**签到**」「**自动完成任务**」
@@ -201,18 +205,34 @@ python ~/.workbuddy/skills/workbuddy-daily-credits/scripts/claim_all.py --versio
 ```bash
 cd ~/.workbuddy/skills/workbuddy-daily-credits
 
-# 1) 老客户端（登录态明文）可直接导出
-python scripts/wb_auth.py --export-rt --save
+# 自动复用已有配置 → 尝试本机明文导出 → 必要时本机隐藏输入 → 自动体检
+python scripts/setup_auth.py
 
-# 2) 5.6.2+ 加密登录态：手动录入一次
-python scripts/wb_auth.py --setup-rt '<你的长效令牌>'
+# WorkBuddy 的命令工具不能提供安全交互终端时，改用本机密码框（需 tkinter/桌面）
+python scripts/setup_auth.py --gui
 
-# 3) 体检（只读，不领任何东西）
-python scripts/claim_all.py --check
+# 安装器/后台任务使用：不弹窗、不等输入；缺授权时返回退出码 2
+python scripts/setup_auth.py --non-interactive
 ```
 
-如果报 `cannot_export`，别折腾解密——按第 2 步录入即可。
-你机器上若已有别的长效令牌版工具写下的 `~/.workbuddy/checkin-rt.json`，**本技能直接复用，不用重配**。
+**令牌只在用户本机输入，绝不发到任何聊天。** `--setup-rt '<令牌>'` 的旧式命令参数输入已停用，
+避免凭据进入命令历史、进程列表与工具记录。终端无法隐藏输入时会停止，不回退到明文。
+底层入口 `python scripts/wb_auth.py --setup-rt` / `--setup-gui` 只负责保存；推荐使用上面的整合入口，保存后自动体检。
+
+如果已在 WorkBuddy 官方界面扫码登录，而且宿主提供**实际可用的安全授权交接能力**，Agent 可复用它，再执行 `--check`。
+本仓库目前没有实现独立扫码登录协议，也不生成登录二维码。**隐藏输入是本机录入方式，不是获取令牌或扫码授权的替代品。**
+若客户端登录态加密、权限不足、文件不存在或宿主无法交接，脚本会返回具体原因并停在“安装完成，授权待完成”；
+不要反复重装、解密客户端、复制监听代码或要求用户把 token 发给 Agent。
+
+只有用户已从官方渠道自行取得自己的令牌时，才使用本机输入入口。没有令牌时，需要先完成官方登录并由受支持接口提供授权；
+不能保证所有 WorkBuddy 版本都能自动授权。GUI 不可用时改在自己的交互终端运行，别粘到聊天输入框。
+
+`setup_auth.py` 退出码：`0` 已配置且体检通过，`1` 体检存在失败项/执行错误，`2` 授权未完成或刷新失败。
+`configured: true` 只代表本机有配置，只有 `status: ready` 且 `check_exit_code: 0` 才代表体检通过。
+确认授权失效后用 `python scripts/setup_auth.py --replace`（或加 `--gui`）本机重新录入；网络错误时先排查连接。
+
+你机器上若已有其他工具写下的 `~/.workbuddy/checkin-rt.json`，本技能先尝试复用并验证，不必重配。
+v1.1.0 是**技能版本**，不会改变腾讯签发的令牌格式或有效期。
 
 ---
 
@@ -225,7 +245,10 @@ python scripts/claim_all.py --check
 
 ```
 帮我安装 workbuddy-daily-credits 技能，装到 ~/.workbuddy/skills/ 下，
-配置好长效令牌，然后跑一次 --check 把体检结果给我看。
+读取 SKILL.md 并运行 scripts/setup_auth.py --non-interactive。
+优先使用你真实支持的官方扫码/登录流程安全交接授权；若无法交接，只提供本机隐藏输入/密码框。
+不要让我把令牌发到聊天，不在控制台、日志、命令参数或回执中输出令牌。
+保存后自动跑 --check，只告诉我脱敏状态，没授权成功就明确说待完成。
 ```
 
 ### ② 建立"永久"每日自动领取（核心）
@@ -240,7 +263,7 @@ python scripts/claim_all.py --check
 
 - 每天到点自动执行，你**不需要登录、不需要点任何按钮**；
 - 结果以一条任务会话出现在 WorkBuddy 里（见下一节）；
-- 长效令牌自续期，所以不存在"第二天又要重新登录"的情况。
+- 正常情况下自动续期；若账号授权被撤销或服务策略变化，仍需重新授权。
 
 ### ③ 手动补跑
 
@@ -250,7 +273,7 @@ python scripts/claim_all.py --check
 
 （同义触发：`签到` / `打卡` / `把能领的积分都领了` / `自动完成任务`）
 
-### ④ 查状态，不产生任何写操作
+### ④ 查状态，不领取积分
 
 ```
 看看我还有哪些 WorkBuddy 积分没领
@@ -315,13 +338,13 @@ schtasks /create /tn "WorkBuddyDailyCredits" /tr "python \"%USERPROFILE%\.workbu
 
 ```bash
 python scripts/claim_all.py            # 完整流程：5 类来源一次领完
-python scripts/claim_all.py --check    # 只读体检，不产生任何写请求
+python scripts/claim_all.py --check    # 只读体检，不操作积分活动（仍会刷新/保存令牌）
 python scripts/claim_all.py --quiet    # 只输出一行结论（给定时任务用）
 ```
 
 | 参数 | 作用 |
 |---|---|
-| `--check` | 只读体检，不做任何写操作 |
+| `--check` | 只读体检，不操作积分活动（仍会刷新/保存令牌） |
 | `--no-checkin` | 跳过签到 |
 | `--no-tasks` | 跳过成长中心任务（不接取、不领取） |
 | `--no-travel` | 跳过派猫猫旅行 |
@@ -362,7 +385,7 @@ python scripts/claim_all.py --quiet    # 只输出一行结论（给定时任务
 3. 进度一满，脚本下次运行**自动领走**（claim）。
 
 你省掉的是"反复去任务页点领取"，省不掉"用产品"本身。
-也正因如此，它**不会**让你的账号出问题——只调用官方接口，不伪造任何东西。
+活动资格、授权有效性和账户限制以官方服务端规则为准。
 
 其它明确不做的事：
 
@@ -377,21 +400,27 @@ python scripts/claim_all.py --quiet    # 只输出一行结论（给定时任务
 | 项 | 做法 |
 |---|---|
 | 令牌存储 | 仅本机 `~/.workbuddy/checkin-rt.json`，POSIX 下 `0600` |
-| 令牌展示 | 任何输出、日志、异常都只出现 `eyJhbG...xxxx` 脱敏形态 |
+| 令牌展示 | 命令行不输出完整令牌；统一输出脱敏，保存返回值不含凭据 |
+| 令牌输入 | 本机 `getpass` 隐藏输入或 tkinter 密码框；拒绝参数传入与终端明文回退 |
 | 网络出口 | 只访问 `www.workbuddy.cn` / `www.codebuddy.cn` / `copilot.tencent.com` |
 | 写操作范围 | 仅官方活动接口的领取类端点 |
 | 依赖 | 零第三方包，纯 Python 标准库；不装 Electron、不起后台服务 |
 | 清除令牌 | `python scripts/wb_auth.py --forget` 立即置空 |
 
-`--check` 模式**一个写请求都不发**，可以放心先跑它验证配置。
+`--check` 不接取任务、不领取、不派遣、不兑换、不抽奖；仍会请求官方认证续期接口，必要时回写本机令牌，并通过 POST 查询签到状态。
 
 ---
 
 ## 常见问题
 
-**Q：`--export-rt` 报"登录态已加密"怎么办？**
-A：5.6.2+ 的官方设计（解密密钥在客户端运行时内存里，不落盘）。改用
-`python scripts/wb_auth.py --setup-rt '<令牌>'` 录入一次即可。
+**Q：`--export-rt` 不可用怎么办？会自动给我二维码吗？**
+A：先看原因：可能是加密、读取权限、文件缺失或格式不支持。本工具不解密登录态，也未实现独立扫码协议。
+若 WorkBuddy 宿主实际支持官方扫码并安全交接授权，优先用该能力；否则只在你已自行取得令牌时，
+运行 `python scripts/setup_auth.py` 隐藏输入或 `--gui` 本机密码框保存，再自动体检。不要把令牌发给 Agent。
+
+**Q：为什么没有弹出隐藏输入？**
+A：安装器调用的是非交互模式，缺凭据时不会等待。请在自己的交互终端运行 `setup_auth.py`，或加 `--gui`。
+GUI 需要系统的 tkinter 和可用桌面；若系统没提供，用终端方案，无需额外 Python 第三方包。
 
 **Q：任务一直卡在 `0/1`？**
 A：说明那个任务的真实行为还没发生。等级 C 的任务去点一次，次日自动到账。
@@ -422,7 +451,9 @@ workbuddy-daily-credits/
 ├── install.sh / install.ps1  # 一键安装
 ├── scripts/
 │   ├── claim_all.py          # 统一入口：5 类来源一次领完
-│   └── wb_auth.py            # 令牌管理：续期 / 导出 / 录入 / 清除
+│   ├── wb_auth.py            # 令牌管理：续期 / 安全导出 / 隐藏录入 / 清除
+│   └── setup_auth.py         # 首次安全配置入口：复用/导出/隐藏输入 → 自动 --check
+├── tests/                   # 零真实凭据、零活动请求的回归测试
 └── references/
     └── api-spec.md           # 接口规格（请求体、字段、错误码）
 ```
@@ -436,7 +467,7 @@ WorkBuddy 启动时扫描该目录下的每个子目录，读其中的 `SKILL.md
 
 ## 版本
 
-当前 **v1.0**（tag `v1.0`）。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+当前 **v1.1**（脚本与技能版本 `1.1.0`，tag `v1.1`）。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
